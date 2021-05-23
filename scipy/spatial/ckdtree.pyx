@@ -18,14 +18,14 @@ from libcpp.algorithm cimport sort
 from libcpp cimport bool
 
 cimport cython
-
-from multiprocessing import cpu_count
+import os
 import threading
+import operator
+import warnings
 
 cdef extern from "<limits.h>":
     long LONG_MAX
 
-cdef int number_of_processors = cpu_count()
 
 __all__ = ['cKDTree']
 
@@ -379,6 +379,36 @@ cdef class cKDTreeNode:
             return self._indices[start:stop]
 
 
+cdef np.intp_t get_num_workers(workers: object, kwargs: dict) except -1:
+    """Handle the workers argument, translating the old n_jobs name"""
+    if workers is None:
+        if 'n_jobs' in kwargs:
+            warnings.warn(
+                'The n_jobs argument has been renamed "workers". '
+                'The old name "n_jobs" will stop working in SciPy 1.8.0.',
+                DeprecationWarning)
+            workers = kwargs.pop('n_jobs')
+        else:
+            workers = 1
+
+    if len(kwargs) > 0:
+        raise TypeError(
+            f"Unexpected keyword argument{'s' if len(kwargs) > 1 else ''} "
+            f"{kwargs}")
+
+    cdef np.intp_t n = operator.index(workers)
+    if n == -1:
+        num = os.cpu_count()
+        if num is None:
+            raise NotImplementedError(
+                'Cannot determine the number of cpus using os.cpu_count(), '
+                'cannot use -1 for the number of workers')
+        n = num
+    elif n <= 0:
+        raise ValueError(f'Invalid number of workers {workers}, must be -1 or > 0')
+    return n
+
+
 # Main cKDTree class
 # ==================
 
@@ -393,24 +423,12 @@ cdef class cKDTree:
     which can be used to rapidly look up the nearest neighbors of any
     point.
 
-    The algorithm used is described in Maneewongvatana and Mount 1999.
-    The general idea is that the kd-tree is a binary trie, each of whose
-    nodes represents an axis-aligned hyperrectangle. Each node specifies
-    an axis and splits the set of points based on whether their coordinate
-    along that axis is greater than or less than a particular value.
-
-    During construction, the axis and splitting point are chosen by the
-    "sliding midpoint" rule, which ensures that the cells do not all
-    become long and thin.
-
-    The tree can be queried for the r closest neighbors of any given point
-    (optionally returning only those within some maximum distance of the
-    point). It can also be queried, with a substantial gain in efficiency,
-    for the r approximate closest neighbors.
-
-    For large dimensions (20 is already large) do not expect this to run
-    significantly faster than brute force. High-dimensional nearest-neighbor
-    queries are a substantial open problem in computer science.
+    .. note::
+       `cKDTree` is functionally identical to `KDTree`. Prior to SciPy
+       v1.6.0, `cKDTree` had better performance and slightly different
+       functionality but now the two names exist only for
+       backward-compatibility reasons. If compatibility with SciPy < 1.6 is not
+       a concern, prefer `KDTree`.
 
     Parameters
     ----------
@@ -442,6 +460,27 @@ cdef class cKDTree:
         into :math:`[0, L_i)`. A ValueError is raised if any of the data is
         outside of this bound.
 
+    Notes
+    -----
+    The algorithm used is described in Maneewongvatana and Mount 1999.
+    The general idea is that the kd-tree is a binary tree, each of whose
+    nodes represents an axis-aligned hyperrectangle. Each node specifies
+    an axis and splits the set of points based on whether their coordinate
+    along that axis is greater than or less than a particular value.
+
+    During construction, the axis and splitting point are chosen by the
+    "sliding midpoint" rule, which ensures that the cells do not all
+    become long and thin.
+
+    The tree can be queried for the r closest neighbors of any given point
+    (optionally returning only those within some maximum distance of the
+    point). It can also be queried, with a substantial gain in efficiency,
+    for the r approximate closest neighbors.
+
+    For large dimensions (20 is already large) do not expect this to run
+    significantly faster than brute force. High-dimensional nearest-neighbor
+    queries are a substantial open problem in computer science.
+
     Attributes
     ----------
     data : ndarray, shape (n,m)
@@ -461,16 +500,12 @@ cdef class cKDTree:
     mins : ndarray, shape (m,)
         The minimum value in each dimension of the n data points.
     tree : object, class cKDTreeNode
-        This attribute exposes a Python view of the root node in the cKDTree 
-        object. A full Python view of the kd-tree is created dynamically 
-        on the first access. This attribute allows you to create your own 
+        This attribute exposes a Python view of the root node in the cKDTree
+        object. A full Python view of the kd-tree is created dynamically
+        on the first access. This attribute allows you to create your own
         query functions in Python.
     size : int
         The number of nodes in the tree.
-
-    See Also
-    --------
-    KDTree : Implementation of `cKDTree` in pure Python
 
     """
     cdef:
@@ -485,13 +520,13 @@ cdef class cKDTree:
 
     property n:
         def __get__(self): return self.cself.n
-    
+
     property m:
         def __get__(self): return self.cself.m
-    
+
     property leafsize:
         def __get__(self): return self.cself.leafsize
-    
+
     property size:
         def __get__(self): return self.cself.size
 
@@ -633,9 +668,9 @@ cdef class cKDTree:
     @cython.boundscheck(False)
     def query(cKDTree self, object x, object k=1, np.float64_t eps=0,
               np.float64_t p=2, np.float64_t distance_upper_bound=INFINITY,
-              np.intp_t n_jobs=1):
+              object workers=None, **kwargs):
         """
-        query(self, x, k=1, eps=0, p=2, distance_upper_bound=np.inf, n_jobs=1)
+        query(self, x, k=1, eps=0, p=2, distance_upper_bound=np.inf, workers=1)
 
         Query the kd-tree for nearest neighbors
 
@@ -662,9 +697,13 @@ cdef class cKDTree:
             tree searches, so if you are doing a series of nearest-neighbor
             queries, it may help to supply the distance to the nearest neighbor
             of the most recent point.
-        n_jobs : int, optional
-            Number of jobs to schedule for parallel processing. If -1 is given
-            all processors are used. Default: 1.
+        workers : int, optional
+            Number of workers to use for parallel processing. If -1 is given
+            all CPU threads are used. Default: 1.
+
+            .. versionchanged:: 1.6.0
+               The "n_jobs" argument was renamed "workers". The old name
+               "n_jobs" is deprecated and will stop working in SciPy 1.8.0.
 
         Returns
         -------
@@ -674,7 +713,7 @@ cdef class cKDTree:
             When k == 1, the last dimension of the output is squeezed.
             Missing neighbors are indicated with infinite distances.
         i : ndarray of ints
-            The locations of the neighbors in ``self.data``.
+            The index of each neighbor in ``self.data``.
             If ``x`` has shape ``tuple+(self.m,)``, then ``i`` has shape ``tuple+(k,)``.
             When k == 1, the last dimension of the output is squeezed.
             Missing neighbors are indicated with ``self.n``.
@@ -742,6 +781,7 @@ cdef class cKDTree:
             const np.float64_t [:, ::1] xx
             np.ndarray x_arr = np.ascontiguousarray(x, dtype=np.float64)
             ckdtree *cself = self.cself
+            np.intp_t num_workers = get_num_workers(workers, kwargs)
 
         n = num_points(x_arr, cself.m)
         xx = x_arr.reshape(n, cself.m)
@@ -780,10 +820,7 @@ cdef class cKDTree:
                 query_knn(cself, pdd, pii,
                     pxx, stop-start, pkk, kk.shape[0], kmax, eps, p, distance_upper_bound)
 
-        if (n_jobs == -1):
-            n_jobs = number_of_processors
-
-        _run_threads(_thread_func, n, n_jobs)
+        _run_threads(_thread_func, n, num_workers)
 
         ddret = np.reshape(dd, retshape + (len(k),))
         iiret = np.reshape(ii, retshape + (len(k),))
@@ -803,11 +840,12 @@ cdef class cKDTree:
     # ----------------
 
     def query_ball_point(cKDTree self, object x, object r,
-                         np.float64_t p=2., np.float64_t eps=0, np.intp_t n_jobs=1,
+                         np.float64_t p=2., np.float64_t eps=0, object workers=None,
                          return_sorted=None,
-                         return_length=False):
+                         return_length=False, **kwargs):
         """
-        query_ball_point(self, x, r, p=2., eps=0)
+        query_ball_point(self, x, r, p=2., eps=0, workers=1, return_sorted=None,
+                         return_length=False)
 
         Find all points within distance r of point(s) x.
 
@@ -825,9 +863,14 @@ cdef class cKDTree:
             nearest points are further than ``r / (1 + eps)``, and branches are
             added in bulk if their furthest points are nearer than
             ``r * (1 + eps)``.
-        n_jobs : int, optional
+        workers : int, optional
             Number of jobs to schedule for parallel processing. If -1 is given
             all processors are used. Default: 1.
+
+            .. versionchanged:: 1.6.0
+               The "n_jobs" argument was renamed "workers". The old name
+               "n_jobs" is deprecated and will stop working in SciPy 1.8.0.
+
         return_sorted : bool, optional
             Sorts returned indicies if True and does not sort them if False. If
             None, does not sort single point queries, but does sort
@@ -862,6 +905,17 @@ cdef class cKDTree:
         >>> tree.query_ball_point([2, 0], 1)
         [4, 8, 9, 12]
 
+        Query multiple points and plot the results:
+
+        >>> import matplotlib.pyplot as plt
+        >>> points = np.asarray(points)
+        >>> plt.plot(points[:,0], points[:,1], '.')
+        >>> for results in tree.query_ball_point(([2, 0], [3, 3]), 1):
+        ...     nearby_points = points[results]
+        ...     plt.plot(nearby_points[:,0], nearby_points[:,1], 'o')
+        >>> plt.margins(0.1, 0.1)
+        >>> plt.show()
+
         """
 
         cdef:
@@ -874,6 +928,7 @@ cdef class cKDTree:
             bool sort_output = return_sorted or (
                 return_sorted is None and x_arr.ndim > 1)
 
+            np.intp_t num_workers = get_num_workers(workers, kwargs)
             np.intp_t n = num_points(x_arr, cself.m)
             tuple retshape = np.shape(x_arr)[:-1]
             np.ndarray r_arr = broadcast_contiguous(r, shape=retshape,
@@ -920,11 +975,7 @@ cdef class cKDTree:
                     tmp[j] = cur[j]
                 vout[start + i] = tmp
 
-        # multithreading logic is similar to cKDTree.query
-        if n_jobs == -1:
-            n_jobs = number_of_processors
-
-        _run_threads(_thread_func, n, n_jobs)
+        _run_threads(_thread_func, n, num_workers)
 
         if x_arr.ndim == 1: # scalar query, unpack result.
             result = result[()]
@@ -970,9 +1021,9 @@ cdef class cKDTree:
         >>> import matplotlib.pyplot as plt
         >>> import numpy as np
         >>> from scipy.spatial import cKDTree
-        >>> np.random.seed(21701)
-        >>> points1 = np.random.random((15, 2))
-        >>> points2 = np.random.random((15, 2))
+        >>> rng = np.random.default_rng()
+        >>> points1 = rng.random((15, 2))
+        >>> points2 = rng.random((15, 2))
         >>> plt.figure(figsize=(6, 6))
         >>> plt.plot(points1[:, 0], points1[:, 1], "xk", markersize=14)
         >>> plt.plot(points2[:, 0], points2[:, 1], "og", markersize=14)
@@ -1064,8 +1115,8 @@ cdef class cKDTree:
         >>> import matplotlib.pyplot as plt
         >>> import numpy as np
         >>> from scipy.spatial import cKDTree
-        >>> np.random.seed(21701)
-        >>> points = np.random.random((20, 2))
+        >>> rng = np.random.default_rng()
+        >>> points = rng.random((20, 2))
         >>> plt.figure(figsize=(6, 6))
         >>> plt.plot(points[:, 0], points[:, 1], "xk", markersize=14)
         >>> kd_tree = cKDTree(points)
@@ -1145,16 +1196,17 @@ cdef class cKDTree:
         """
         count_neighbors(self, other, r, p=2., weights=None, cumulative=True)
 
-        Count how many nearby pairs can be formed. (pair-counting)
+        Count how many nearby pairs can be formed.
 
-        Count the number of pairs (x1,x2) can be formed, with x1 drawn
-        from self and x2 drawn from ``other``, and where
+        Count the number of pairs ``(x1,x2)`` can be formed, with ``x1`` drawn
+        from ``self`` and ``x2`` drawn from ``other``, and where
         ``distance(x1, x2, p) <= r``.
 
-        Data points on self and other are optionally weighted by the ``weights``
-        argument. (See below)
+        Data points on ``self`` and ``other`` are optionally weighted by the
+        ``weights`` argument. (See below)
 
-        The algorithm we implement here is based on [1]_. See notes for further discussion.
+        This is adapted from the "two-point correlation" algorithm described by
+        Gray and Moore [1]_.  See notes for further discussion.
 
         Parameters
         ----------
@@ -1241,24 +1293,21 @@ cdef class cKDTree:
 
         .. [1] Gray and Moore,
                "N-body problems in statistical learning",
-               Mining the sky, 2000,
-               https://arxiv.org/abs/astro-ph/0012333
+               Mining the sky, 2000, :arxiv:`astro-ph/0012333`
 
         .. [2] Landy and Szalay,
                "Bias and variance of angular correlation functions",
-               The Astrophysical Journal, 1993,
-               http://adsabs.harvard.edu/abs/1993ApJ...412...64L
+               The Astrophysical Journal, 1993, :doi:`10.1086/172900`
 
         .. [3] Sheth, Connolly and Skibba,
                "Marked correlations in galaxy formation models",
-               Arxiv e-print, 2005,
-               https://arxiv.org/abs/astro-ph/0511773
+               2005, :arxiv:`astro-ph/0511773`
 
         .. [4] Hawkins, et al.,
                "The 2dF Galaxy Redshift Survey: correlation functions,
                peculiar velocities and the matter density of the Universe",
                Monthly Notices of the Royal Astronomical Society, 2002,
-               http://adsabs.harvard.edu/abs/2003MNRAS.346...78H
+               :doi:`10.1046/j.1365-2966.2003.07063.x`
 
         .. [5] https://github.com/scipy/scipy/pull/5647#issuecomment-168474926
 
@@ -1268,20 +1317,20 @@ cdef class cKDTree:
 
         >>> import numpy as np
         >>> from scipy.spatial import cKDTree
-        >>> np.random.seed(21701)
-        >>> points1 = np.random.random((5, 2))
-        >>> points2 = np.random.random((5, 2))
+        >>> rng = np.random.default_rng()
+        >>> points1 = rng.random((5, 2))
+        >>> points2 = rng.random((5, 2))
         >>> kd_tree1 = cKDTree(points1)
         >>> kd_tree2 = cKDTree(points2)
         >>> kd_tree1.count_neighbors(kd_tree2, 0.2)
-        9
+        1
 
         This number is same as the total pair number calculated by
         `query_ball_tree`:
 
         >>> indexes = kd_tree1.query_ball_tree(kd_tree2, r=0.2)
         >>> sum([len(i) for i in indexes])
-        9
+        1
 
         """
         cdef:
@@ -1440,28 +1489,28 @@ cdef class cKDTree:
 
         >>> import numpy as np
         >>> from scipy.spatial import cKDTree
-        >>> np.random.seed(21701)
-        >>> points1 = np.random.random((5, 2))
-        >>> points2 = np.random.random((5, 2))
+        >>> rng = np.random.default_rng()
+        >>> points1 = rng.random((5, 2))
+        >>> points2 = rng.random((5, 2))
         >>> kd_tree1 = cKDTree(points1)
         >>> kd_tree2 = cKDTree(points2)
         >>> sdm = kd_tree1.sparse_distance_matrix(kd_tree2, 0.3)
         >>> sdm.toarray()
-        array([[0.20220215, 0.14538496, 0.,         0.10257199, 0.        ],
-            [0.13491385, 0.27251306, 0.,         0.18793787, 0.        ],
-            [0.19262396, 0.,         0.,         0.25795122, 0.        ],
-            [0.14859639, 0.07076002, 0.,         0.04065851, 0.        ],
-            [0.17308768, 0.,         0.,         0.24823138, 0.        ]])
+        array([[0.        , 0.        , 0.12295571, 0.        , 0.        ],
+           [0.        , 0.        , 0.        , 0.        , 0.        ],
+           [0.28942611, 0.        , 0.        , 0.2333084 , 0.        ],
+           [0.        , 0.        , 0.        , 0.        , 0.        ],
+           [0.24617575, 0.29571802, 0.26836782, 0.        , 0.        ]])
 
         You can check distances above the `max_distance` are zeros:
 
         >>> from scipy.spatial import distance_matrix
         >>> distance_matrix(points1, points2)
-        array([[0.20220215, 0.14538496, 0.43588092, 0.10257199, 0.4555495 ],
-            [0.13491385, 0.27251306, 0.65944131, 0.18793787, 0.68184154],
-            [0.19262396, 0.34121593, 0.72176889, 0.25795122, 0.74538858],
-            [0.14859639, 0.07076002, 0.48505773, 0.04065851, 0.50043591],
-            [0.17308768, 0.32837991, 0.72760803, 0.24823138, 0.75017239]])
+        array([[0.56906522, 0.39923701, 0.12295571, 0.8658745 , 0.79428925],
+           [0.37327919, 0.7225693 , 0.87665969, 0.32580855, 0.75679479],
+           [0.28942611, 0.30088013, 0.6395831 , 0.2333084 , 0.33630734],
+           [0.31994999, 0.72658602, 0.71124834, 0.55396483, 0.90785663],
+           [0.24617575, 0.29571802, 0.26836782, 0.57714465, 0.6473269 ]])
 
         """
 
